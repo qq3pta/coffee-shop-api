@@ -19,3 +19,7 @@ class User(Base):
     is_verified = Column(Boolean, default=False)
     role = Column(Enum(RoleEnum), default=RoleEnum.user, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Поля для верификации
+    verification_code = Column(String, nullable=True)
+    verification_expiry = Column(DateTime(timezone=True), nullable=True)

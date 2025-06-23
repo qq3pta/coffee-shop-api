@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from datetime import datetime
 
 from app.models.user import User
 from app.schemas.user import UserCreate, VerifyRequest
@@ -14,15 +15,17 @@ from app.services.auth import (
     decode_token,
 )
 from app.core.db import get_db
+from app.tasks.worker import send_verification_email_task
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(tags=["auth"])
 
 
 @router.post("/signup", response_model=Token, summary="Register new user")
 async def signup(data: UserCreate, db: AsyncSession = Depends(get_db)):
-    # Создаём пользователя
+    # создаём пользователя и код верификации в сервисе
     user = await create_user(data, db)
-    # По желанию: здесь можно вызвать delete_unverified_users(db)
+    # запускаем фоновую отправку письма
+    send_verification_email_task.delay(user.email, user.verification_code)
     return {
         "access_token": create_access_token(user.id),
         "refresh_token": create_refresh_token(user.id),
@@ -59,14 +62,18 @@ async def refresh(token: str):
     }
 
 
-@router.post("/verify", summary="Verify user (email/SMS)")
+@router.post("/verify", summary="Verify user by code")
 async def verify(data: VerifyRequest, db: AsyncSession = Depends(get_db)):
-    # Упрощённо: сразу помечаем пользователя верифицированным
     result = await db.execute(select(User).filter_by(email=data.email))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    # проверяем код и срок действия
+    if user.verification_code != data.code or user.verification_expiry < datetime.utcnow():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired code")
     user.is_verified = True
+    user.verification_code = None
+    user.verification_expiry = None
     db.add(user)
     await db.commit()
     return {"detail": "User verified"}
